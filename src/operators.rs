@@ -65,7 +65,7 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
                 .sum::<f32>();
 
             // Debugging: Print sum to understand why it's zero
-            println!("Sum for batch {} at position {}: {}", b, i, sum);
+            // println!("Sum for batch {} at position {}: {}", b, i, sum);
 
             // If sum is zero, set a small value to prevent divide by zero
             if sum > f32::EPSILON {
