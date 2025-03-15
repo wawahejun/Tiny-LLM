@@ -10,12 +10,11 @@ use crate::tensor::Tensor;
 use safetensors::SafeTensors;
 use std::path::Path;
 use crate::operators::*;
-use rand::distributions::Distribution;
 
 pub struct Llama<T> {
     vocab: usize,           // vocab size
     n_layers: usize,        // number of layers
-    n_q_h: usize,           // number of heads for q
+    n_q_h: usize,           // number of heads for q  // Q头数量是KV头的整数倍，所以nqh = nkvh * n_groups
     n_kv_h: usize,          // number of heads for k and v
     d: usize,               // dimension of hidden states
     dqkv: usize,            // length of a single q, k, or v vector
@@ -33,7 +32,7 @@ fn easy_softmax(logits: &[f32]) -> Vec<f32> {
     let exp_logits: Vec<_> = logits.iter().map(|&x| (x - max_logit).exp()).collect();
     let sum_exp_logits: f32 = exp_logits.iter().sum();
     let result: Vec<f32> = exp_logits.iter().map(|&x| x / sum_exp_logits).collect();
-    result
+    result.to_vec()
 }
 
 macro_rules! flush_print {
@@ -86,9 +85,6 @@ impl Llama<f32> {
     pub fn forward(&self, input: &Tensor<u32>, cache: &mut KVCache<f32>) -> Tensor<f32> {
         let seq_len = input.size();
         let past_seq_len = cache.len();
-        if past_seq_len + seq_len > self.max_seq_len {
-            panic!("KVCache length exceeds max_seq_len");
-        }
         cache.increment(seq_len);
         let total_seq_len = past_seq_len + seq_len;
         let n_groups = self.n_q_h / self.n_kv_h;
@@ -105,7 +101,6 @@ impl Llama<f32> {
         // Computation Starts Here
         // Embedding lookup
         OP::gather(&mut residual, input, &self.params.embedding_table);
-
         for layer in 0..self.n_layers {
             OP::rms_norm(
                 &mut hidden_states,
@@ -115,11 +110,11 @@ impl Llama<f32> {
             );
 
             let q = (&mut q_buf).reshape(&vec![seq_len, self.n_q_h * self.dqkv]); // (seq, n_h * dqkv)
-            let k = &mut cache.k_cache(layer, past_seq_len); // (seq, n_kv_h * dqkv)
-            let v = &mut cache.v_cache(layer, past_seq_len); // (seq, n_kv_h * dqkv)
+            let mut k = cache.k_cache(layer, past_seq_len); // (seq, n_kv_h * dqkv)
+            let mut v = cache.v_cache(layer, past_seq_len); // (seq, n_kv_h * dqkv)
             OP::matmul_transb(q, 0., &hidden_states, &self.params.wq[layer], 1.0);
-            OP::matmul_transb(k, 0., &hidden_states, &self.params.wk[layer], 1.0);
-            OP::matmul_transb(v, 0., &hidden_states, &self.params.wv[layer], 1.0);
+            OP::matmul_transb(&mut k, 0., &hidden_states, &self.params.wk[layer], 1.0);
+            OP::matmul_transb(&mut v, 0., &hidden_states, &self.params.wv[layer], 1.0);
             OP::rope(
                 q.reshape(&vec![seq_len, self.n_q_h, self.dqkv]),
                 past_seq_len,
@@ -131,15 +126,15 @@ impl Llama<f32> {
                 self.rope_theta,
             );
 
-            let full_k = &mut cache.k_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
-            let full_v = &mut cache.v_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
+            let full_k = cache.k_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
+            let full_v = cache.v_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
 
             self_attention(
                 &mut hidden_states,
                 &mut att_scores,
                 q,
-                full_k,
-                full_v,
+                &full_k,
+                &full_v,
                 self.n_kv_h,
                 n_groups,
                 seq_len,
@@ -147,13 +142,7 @@ impl Llama<f32> {
                 self.dqkv,
             );
 
-            OP::matmul_transb(
-                &mut residual,
-                1.0,
-                &hidden_states,
-                &self.params.wo[layer],
-                1.0,
-            );
+            matmul_transb(&mut residual, 1f32, &hidden_states, &self.params.wo[layer], 1f32);
 
             mlp(
                 &mut residual,
@@ -201,12 +190,6 @@ impl Llama<f32> {
         let mut cache = KVCache::new(self.n_layers, self.max_seq_len, self.n_kv_h * self.dqkv, 0);
 
         while result.len() < max_len {
-            let seq_len = input.len();
-            if cache.len() + seq_len > self.max_seq_len {
-                panic!("KVCache length exceeds max_seq_len");
-            }
-            cache.increment(seq_len);
-
             let mut logits = self.forward(&Tensor::<u32>::new(input.clone(), &vec![input.len()]), &mut cache);
             let length = logits.size();
             let data = unsafe { logits.data_mut() };
@@ -216,12 +199,20 @@ impl Llama<f32> {
                 }
             }
             let logits = easy_softmax(logits.data());
-            let new_word_id = Self::select_word_to_id(&logits, top_p, top_k as usize);
+            let new_word_id = Self::select_word_to_id(&logits.to_vec(), top_p, top_k as usize);
             if new_word_id == self.eos_token_id {
                 break;
             }
             result.push(new_word_id);
-            input.push(new_word_id); // 更新输入历史，保留上下文
+            input = vec![new_word_id];
+
+            // 逐步输出
+            use std::path::PathBuf;
+            use tokenizers::Tokenizer;
+            let project_dir = env!("CARGO_MANIFEST_DIR");
+            let model_dir = PathBuf::from(project_dir).join("models").join("story");
+            let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json")).unwrap();
+            flush_print!("{}", tokenizer.decode(&[new_word_id], true).unwrap());
         }
 
         if result.len() == max_len {
@@ -230,11 +221,9 @@ impl Llama<f32> {
 
         result
     }
-    
-    
 
-    fn select_word_to_id(logits: &[f32], top_p: f32, top_k: usize) -> u32 {
-        let mut indices_and_values: Vec<(usize, f32)> = logits
+    fn select_word_to_id(logits: &Vec<f32>, top_p: f32, top_k: usize) -> u32 {
+        let mut indices_and_values: Vec<(_, _)> = logits
             .iter()
             .enumerate()
             .map(|(index, &value)| (index, value))
@@ -259,18 +248,20 @@ impl Llama<f32> {
 
         let top_indices: Vec<f32> = indices_and_values
             .iter()
+            .cloned()
             .take(take_num)
-            .map(|(_, w)| *w)
+            .map(|(_, w)| w)
             .collect();
 
-        let resampled = easy_softmax(&top_indices);
+        let resampled = easy_softmax(&*top_indices);
 
+        use rand::distributions::Distribution;
         use rand::distributions::WeightedIndex;
-        use rand::thread_rng;
 
-        let mut rng = thread_rng();
-        let dist = WeightedIndex::new(resampled).unwrap();
-        let index = dist.sample(&mut rng);
+        let mut rng = rand::thread_rng();
+        let index = WeightedIndex::new(resampled)
+            .unwrap()
+            .sample(&mut rng);
 
         indices_and_values[index].0 as u32
     }
@@ -282,11 +273,11 @@ fn self_attention(
     q: &Tensor<f32>,                 // (seq, n_kv_h * n_groups * dqkv)
     k: &Tensor<f32>,                 // (total_seq, n_kv_h * dqkv)
     v: &Tensor<f32>,                 // (total_seq, n_kv_h * dqkv)
-    n_kv_h: usize,
-    n_groups: usize,
-    seq_len: usize,
-    total_seq_len: usize,
-    dqkv: usize,
+    n_kv_h: usize,                   // number of heads for k and v
+    n_groups: usize,                 // n_head_of_q / n_head_of_k
+    seq_len: usize,                  // input len of seq-token-vec
+    total_seq_len: usize,            // len of kv-cache + seq_len
+    dqkv: usize,                     // length of a single q, k, or v vector，人话：dim
 ) {
     let bias: usize = seq_len * total_seq_len;
     let (beta, alpha) = (0f32, 1.0 / ((dqkv as f32).sqrt()));
@@ -307,7 +298,7 @@ fn self_attention(
         }
     }
 
-    OP::masked_softmax(att_scores);
+    masked_softmax(att_scores);
 
     let (_a, _b, _c) = (att_scores.data(), v.data(), unsafe { hidden_states.data_mut() });
     for head in 0..n_kv_h {
@@ -316,7 +307,9 @@ fn self_attention(
             for i in 0..seq_len {
                 for j in 0..dqkv {
                     let idx = i * n_kv_h * n_groups * dqkv + bh * dqkv + j;
-                    _c[idx] = (0..total_seq_len).map(|idx| _a[bh * bias + i * total_seq_len + idx] * _b[head * dqkv + j + idx * n_kv_h * dqkv]).sum::<f32>();
+                    _c[idx] = (0..total_seq_len)
+                        .map(|idx| _a[bh * bias + i * total_seq_len + idx] * _b[head * dqkv + j + idx * n_kv_h * dqkv])
+                        .sum::<f32>();
                 }
             }
         }
@@ -324,8 +317,8 @@ fn self_attention(
 }
 
 fn mlp(
-    residual: &mut Tensor<f32>,
-    hidden_states: &mut Tensor<f32>,
+    residual: &mut Tensor<f32>,     // x 以及之后的 y
+    hidden_states: &mut Tensor<f32>,    // 用于存储过程中的计算结果
     gate: &mut Tensor<f32>,
     up: &mut Tensor<f32>,
     w_up: &Tensor<f32>,
@@ -334,10 +327,10 @@ fn mlp(
     rms_w: &Tensor<f32>,
     eps: f32,
 ) {
-    OP::rms_norm(hidden_states, &residual, &rms_w, eps);
-    OP::matmul_transb(gate, 0., &hidden_states, &w_gate, 1.0);
-    OP::matmul_transb(up, 0., &hidden_states, &w_up, 1.0);
-    OP::swiglu(up, &gate);
-    OP::matmul_transb(residual, 1.0, &up, &w_down, 1.0);
+    rms_norm(hidden_states, residual, rms_w, eps);
+    matmul_transb(gate, 0f32, hidden_states, w_gate, 1f32);
+    matmul_transb(up, 0f32, hidden_states, w_up, 1f32);
+    swiglu(up, gate);
+    matmul_transb(residual, 1f32, up, w_down, 1f32);
 }
 
