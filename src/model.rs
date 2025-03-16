@@ -10,6 +10,8 @@ use crate::tensor::Tensor;
 use safetensors::SafeTensors;
 use std::path::Path;
 use crate::operators::*;
+use tokenizers::Tokenizer;
+use std::path::PathBuf;
 
 pub struct Llama<T> {
     vocab: usize,           // vocab size
@@ -25,6 +27,7 @@ pub struct Llama<T> {
     params: LLamaParams<T>, // trained weights of this model
     bos_token_id: u32,      // start token id
     eos_token_id: u32,      // end token id
+    model_dir: PathBuf, 
 }
 
 fn easy_softmax(logits: &[f32]) -> Vec<f32> {
@@ -75,6 +78,7 @@ impl Llama<f32> {
             params,
             bos_token_id: config.bos_token_id,
             eos_token_id: config.eos_token_id,
+            model_dir: model_dir.as_ref().to_path_buf(),
         }
     }
 
@@ -222,6 +226,64 @@ impl Llama<f32> {
         result
     }
 
+    pub fn chat(
+        &self,
+        messages: &[(&str, &str)], // (role, content) pairs
+        cache: &mut KVCache<f32>,
+        max_len: usize,
+        top_p: f32,
+        top_k: u32,
+        temperature: f32,
+    ) -> String {
+        // Build the prompt using the Jinja2 template
+        let mut prompt = String::new();
+        for (role, content) in messages {
+            prompt.push_str(&format!("<|im_start|>{}", role));
+            prompt.push('\n');
+            prompt.push_str(content);
+            prompt.push_str("<|im_end|>");
+            prompt.push('\n');
+        }
+        prompt.push_str("<|im_start|>assistant\n");
+
+        // Tokenize the prompt
+        let tokenizer = self.load_tokenizer();
+        let input_ids = tokenizer.encode(&*prompt, true).unwrap().get_ids().to_vec();
+
+        // Generate the response
+        let mut result = Vec::new();
+        let mut input = input_ids.clone();
+        while result.len() < max_len {
+            let mut logits = self.forward(&Tensor::<u32>::new(input.clone(), &vec![input.len()]), cache);
+            let length = logits.size();
+            let data = unsafe { logits.data_mut() };
+            if temperature > 0. {
+                for i in 0..length {
+                    data[i] /= temperature;
+                }
+            }
+            let logits = easy_softmax(logits.data());
+            let new_word_id = Self::select_word_to_id(&logits.to_vec(), top_p, top_k as usize);
+            if new_word_id == self.eos_token_id {
+                break;
+            }
+            result.push(new_word_id);
+            input = vec![new_word_id];
+        }
+
+        // Decode the response
+        tokenizer.decode(&result, true).unwrap()
+    }
+
+    fn load_tokenizer(&self) -> Tokenizer {
+        use std::path::PathBuf;
+        let project_dir = env!("CARGO_MANIFEST_DIR");
+        let model_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models").join("story");
+
+        Tokenizer::from_file(self.model_dir.join("tokenizer.json"))
+        .expect("Failed to load tokenizer. Please ensure tokenizer.json exists in the correct path.")
+    }
+    
     fn select_word_to_id(logits: &Vec<f32>, top_p: f32, top_k: usize) -> u32 {
         let mut indices_and_values: Vec<(_, _)> = logits
             .iter()
@@ -333,4 +395,3 @@ fn mlp(
     swiglu(up, gate);
     matmul_transb(residual, 1f32, up, w_down, 1f32);
 }
-

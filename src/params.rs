@@ -25,8 +25,6 @@ pub struct LLamaParams<T> {
 
 impl LLamaParams<f32> {
     pub fn from_safetensors(safetensor: &SafeTensors, config: &LlamaConfigJson) -> Self {
-        // 打印 safetensors 中所有可⽤的张量名称
-        println!("Available tensors: {:?}", safetensor.names());
 
         // 辅助函数：安全地获取张量
         let get_tensor = |name: &str| -> Tensor<f32> {
