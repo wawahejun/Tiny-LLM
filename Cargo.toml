@@ -2,6 +2,7 @@
 name = "learning-lm-rust"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -10,3 +11,6 @@ safetensors = "0.4.3"
 tokenizers = "0.19.1"
 rand = "0.8"
 log = "0.4.22"
+rustacuda = "0.1.0"
+rustacuda_core = "0.1.0"
+rustacuda_derive = "0.1.0"

@@ -1,0 +1,3 @@
+cargo:rerun-if-changed=src/cuda_kernels/matmul_transb_kernel.cu
+cargo:rerun-if-changed=src/cuda_kernels/rms_norm_kernel.cu
+cargo:rerun-if-changed=src/cuda_kernels/rope_kernel.cu
