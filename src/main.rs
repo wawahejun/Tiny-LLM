@@ -15,6 +15,26 @@ use serde::{Deserialize, Serialize};
 
 
 fn main() {
+    // 检查 CUDA 设备
+    match rustacuda::init(rustacuda::CudaFlags::empty()) {
+        Ok(_) => {
+            match rustacuda::device::Device::get_device(0) {
+                Ok(device) => {
+                    let name = device.name().unwrap_or_else(|_| "未知".to_string());
+                    println!("找到 CUDA 设备: {}", name);
+                }
+                Err(e) => {
+                    eprintln!("无法获取 CUDA 设备: {:?}", e);
+                    eprintln!("程序将继续运行，但 CUDA 功能可能不可用");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("初始化 CUDA 失败: {:?}", e);
+            eprintln!("程序将继续运行，但 CUDA 功能可能不可用");
+        }
+    }
+    
     // 解析命令行参数
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {

@@ -1,9 +1,44 @@
 use crate::tensor::Tensor;
 use rustacuda::prelude::*;
-use rustacuda::memory::{DeviceBuffer, DevicePointer};
+use rustacuda::memory::DeviceBuffer;
 use rustacuda::function::BlockSize;
 use rustacuda::launch;
 use std::ffi::CString;
+use std::sync::{Arc, Once};
+use std::cell::RefCell;
+use std::thread_local;
+
+// 用于 CUDA 初始化
+static CUDA_INIT: Once = Once::new();
+
+// 线程本地存储上下文
+thread_local! {
+    static CUDA_CONTEXT: RefCell<Option<Context>> = RefCell::new(None);
+}
+
+// 一次性初始化 CUDA
+fn init_cuda() {
+    CUDA_INIT.call_once(|| {
+        // 初始化 CUDA
+        rustacuda::init(CudaFlags::empty()).unwrap();
+    });
+    
+    // 使用线程本地存储来管理上下文
+    CUDA_CONTEXT.with(|ctx| {
+        if ctx.borrow().is_none() {
+            // 为当前线程创建新的上下文
+            let device = Device::get_device(0).unwrap();
+            let context = Context::create_and_push(
+                ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO, 
+                device
+            ).unwrap();
+            
+            // 存储上下文到线程本地存储
+            *ctx.borrow_mut() = Some(context);
+        }
+        // 移除了尝试重新激活上下文的代码，因为 create_and_push 已经确保了上下文是活动的
+    });
+}
 
 // get (row) vectors from a 2D table given a list of indices
 pub fn gather(y: &mut Tensor<f32>, indices: &Tensor<u32>, table: &Tensor<f32>) {
@@ -20,18 +55,38 @@ pub fn gather(y: &mut Tensor<f32>, indices: &Tensor<u32>, table: &Tensor<f32>) {
 }
 
 pub fn rope(y: &mut Tensor<f32>, start_pos: usize, theta: f32) {
-    // 初始化 CUDA
-    rustacuda::init(CudaFlags::empty()).unwrap();
-    let device = Device::get_device(0).unwrap();
-    let _ctx = Context::create_and_push(ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO, device).unwrap();
-
+    // Initialize CUDA if not already done
+    init_cuda();
+    
+    
     // 加载 PTX 模块
-    let ptx = CString::new(include_str!("../rope_kernel.ptx")).unwrap();
-    let module = Module::load_from_string(&ptx).unwrap();
+    let ptx = match CString::new(include_str!("../rope_kernel.ptx")) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("创建 CString 失败: {:?}", e);
+            return;
+        }
+    };
+    
+    let module = match Module::load_from_string(&ptx) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("加载 PTX 模块失败: {:?}", e);
+            return;
+        }
+    };
+    
 
     // 获取内核函数
     let func_name = CString::new("rope").unwrap();
-    let function = module.get_function(&func_name).unwrap();
+    let function = match module.get_function(&func_name) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("获取函数 'rope' 失败: {:?}", e);
+            return;
+        }
+    };
+    
 
     // 获取张量形状
     let shape = y.shape();
@@ -108,14 +163,18 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
 }
 
 pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: f32) {
-    // 初始化 CUDA
-    rustacuda::init(CudaFlags::empty()).unwrap();
-    let device = Device::get_device(0).unwrap();
-    let _ctx = Context::create_and_push(ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO, device).unwrap();
-
+    // Initialize CUDA if not already done
+    init_cuda();
+    
     // 加载 PTX 模块
     let ptx = CString::new(include_str!("../rms_norm_kernel.ptx")).unwrap();
-    let module = Module::load_from_string(&ptx).unwrap();
+    let module = match Module::load_from_string(&ptx) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("加载 PTX 模块失败: {:?}", e);
+            return;
+        }
+    };
 
     // 获取内核函数
     let func_name = CString::new("rms_norm").unwrap();
@@ -137,7 +196,8 @@ pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: 
             x_gpu.as_device_ptr(),
             w_gpu.as_device_ptr(),
             y_gpu.as_device_ptr(),
-            epsilon
+            epsilon,
+            w.size() as i32  // 添加缺少的 dim 参数
         )).unwrap();
     }
 
@@ -164,14 +224,18 @@ pub fn swiglu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
 // C = beta * C + alpha * A @ B^T
 // hint: You don't need to do an explicit transpose of B
 pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor<f32>, alpha: f32) {
-    // 初始化 CUDA
-    rustacuda::init(CudaFlags::empty()).unwrap();
-    let device = Device::get_device(0).unwrap();
-    let _ctx = Context::create_and_push(ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO, device).unwrap();
+    // Initialize CUDA if not already done
+    init_cuda();
 
     // 加载 PTX 模块
     let ptx = CString::new(include_str!("../matmul_kernel.ptx")).unwrap();
-    let module = Module::load_from_string(&ptx).unwrap();
+    let module = match Module::load_from_string(&ptx) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("加载 PTX 模块失败: {:?}", e);
+            return;
+        }
+    };
 
     // 获取内核函数
     let func_name = CString::new("matmul_transb").unwrap();
