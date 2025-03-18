@@ -330,48 +330,66 @@ impl Llama<f32> {
 }
 
 fn self_attention(
-    hidden_states: &mut Tensor<f32>, // (seq, n_kv_h * n_groups * dqkv)
-    att_scores: &mut Tensor<f32>,    // (n_kv_h, n_groups, seq, total_seq)
-    q: &Tensor<f32>,                 // (seq, n_kv_h * n_groups * dqkv)
-    k: &Tensor<f32>,                 // (total_seq, n_kv_h * dqkv)
-    v: &Tensor<f32>,                 // (total_seq, n_kv_h * dqkv)
-    n_kv_h: usize,                   // number of heads for k and v
-    n_groups: usize,                 // n_head_of_q / n_head_of_k
-    seq_len: usize,                  // input len of seq-token-vec
-    total_seq_len: usize,            // len of kv-cache + seq_len
-    dqkv: usize,                     // length of a single q, k, or v vector，人话：dim
+    hidden_states: &mut Tensor<f32>,
+    att_scores: &mut Tensor<f32>,
+    q: &Tensor<f32>,
+    k: &Tensor<f32>,
+    v: &Tensor<f32>,
+    n_kv_h: usize,
+    n_groups: usize,
+    seq_len: usize,
+    total_seq_len: usize,
+    dqkv: usize,
 ) {
     let bias: usize = seq_len * total_seq_len;
-    let (beta, alpha) = (0f32, 1.0 / ((dqkv as f32).sqrt()));
-    let (_m, _k, _n) = (seq_len, dqkv, total_seq_len);
+    let scale = 1.0 / ((dqkv as f32).sqrt());
+    
+    // 计算注意力分数
     for head in 0..n_kv_h {
         for group in 0..n_groups {
             let bh = n_groups * head + group;
-            let (_a, _b, _c) = (q.data(), k.data(), unsafe { att_scores.data_mut() });
-            let clip_a = |i, j| _a[i * n_kv_h * n_groups * _k + bh * _k + j];
-            let clip_b = |i, j| _b[i * n_kv_h * _k + head * _k + j];
-            for mi in 0.._m {
-                for ni in 0.._n {
+            let (_q, _k, _scores) = (q.data(), k.data(), unsafe { att_scores.data_mut() });
+            
+            for mi in 0..seq_len {
+                let q_base = mi * n_kv_h * n_groups * dqkv + bh * dqkv;
+                for ni in 0..total_seq_len {
+                    let k_base = ni * n_kv_h * dqkv + head * dqkv;
                     let idx = bh * bias + mi * total_seq_len + ni;
-                    _c[idx] *= beta;
-                    _c[idx] += alpha * (0.._k).map(|ki| clip_a(mi, ki) * clip_b(ni, ki)).sum::<f32>();
+                    
+                    // 计算注意力分数
+                    let mut score = 0.0f32;
+                    for ki in 0..dqkv {
+                        score += _q[q_base + ki] * _k[k_base + ki];
+                    }
+                    _scores[idx] = score * scale;
+                    
+                    // 应用因果掩码
+                    if ni >= (total_seq_len - seq_len + mi) {
+                        _scores[idx] = f32::NEG_INFINITY;
+                    }
                 }
             }
         }
     }
 
+    // 应用 softmax
     masked_softmax(att_scores);
 
-    let (_a, _b, _c) = (att_scores.data(), v.data(), unsafe { hidden_states.data_mut() });
+    // 计算输出
+    let (_attn, _v, _out) = (att_scores.data(), v.data(), unsafe { hidden_states.data_mut() });
     for head in 0..n_kv_h {
         for group in 0..n_groups {
             let bh = n_groups * head + group;
             for i in 0..seq_len {
+                let out_base = i * n_kv_h * n_groups * dqkv + bh * dqkv;
+                let attn_base = bh * bias + i * total_seq_len;
+                
                 for j in 0..dqkv {
-                    let idx = i * n_kv_h * n_groups * dqkv + bh * dqkv + j;
-                    _c[idx] = (0..total_seq_len)
-                        .map(|idx| _a[bh * bias + i * total_seq_len + idx] * _b[head * dqkv + j + idx * n_kv_h * dqkv])
-                        .sum::<f32>();
+                    let mut sum = 0.0f32;
+                    for t in 0..total_seq_len {
+                        sum += _attn[attn_base + t] * _v[t * n_kv_h * dqkv + head * dqkv + j];
+                    }
+                    _out[out_base + j] = sum;
                 }
             }
         }

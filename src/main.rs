@@ -67,7 +67,7 @@ fn main() {
         ];
 
         // 生成回复
-        let response = llama.chat(&messages, &mut cache, 100, 0.9, 40, 0.7);
+        let response = llama.chat(&messages, &mut cache, 100, 0.9, 50, 0.1);
         println!("AI: {}", response);
     }
 }

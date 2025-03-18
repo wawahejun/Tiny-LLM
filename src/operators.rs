@@ -58,7 +58,6 @@ pub fn rope(y: &mut Tensor<f32>, start_pos: usize, theta: f32) {
     // Initialize CUDA if not already done
     init_cuda();
     
-    
     // 加载 PTX 模块
     let ptx = match CString::new(include_str!("../rope_kernel.ptx")) {
         Ok(p) => p,
@@ -75,7 +74,6 @@ pub fn rope(y: &mut Tensor<f32>, start_pos: usize, theta: f32) {
             return;
         }
     };
-    
 
     // 获取内核函数
     let func_name = CString::new("rope").unwrap();
@@ -86,7 +84,6 @@ pub fn rope(y: &mut Tensor<f32>, start_pos: usize, theta: f32) {
             return;
         }
     };
-    
 
     // 获取张量形状
     let shape = y.shape();
@@ -128,6 +125,9 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
     let batch = y.size() / (seq_len * total_seq_len);
     let data = unsafe { y.data_mut() };
 
+    // 修改：添加数值稳定性处理
+    let epsilon = 1e-6f32;
+
     for b in 0..batch {
         let base = b * seq_len * total_seq_len;
 
@@ -135,28 +135,35 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
             let offset = base + i * total_seq_len;
             let boundary = total_seq_len - seq_len + i + 1;
 
+            // 修改：处理可能的NaN或inf值
             let max = data[offset..offset + boundary]
                 .iter()
-                .fold(data[offset], |a, b| a.max(*b));
+                .fold(f32::NEG_INFINITY, |a, &b| {
+                    if b.is_finite() { a.max(b) } else { a }
+                });
 
             let sum = (0..boundary)
                 .map(|j| {
-                    let e = (data[offset + j] - max).exp();
+                    let e = if data[offset + j].is_finite() {
+                        (data[offset + j] - max).exp()
+                    } else {
+                        0.0
+                    };
                     data[offset + j] = e;
                     e
                 })
                 .sum::<f32>();
 
-            // 如果 sum 大于 epsilon，则进行除法
-            if sum > f32::EPSILON {
+            // 修改：添加数值稳定性检查
+            if sum > epsilon {
                 (0..boundary).for_each(|j| data[offset + j] /= sum);
             } else {
-                // 如果 sum 太小，则设置为 0
-                println!("Warning: Sum is zero or too small, skipping division");
-                (0..boundary).for_each(|j| data[offset + j] = 0.0);
+                // 如果和太小，使用均匀分布
+                let uniform_value = 1.0 / boundary as f32;
+                (0..boundary).for_each(|j| data[offset + j] = uniform_value);
             }
 
-            // 将剩余值设置为 0.0
+            // 将剩余值设置为0.0
             (boundary..total_seq_len).for_each(|j| data[offset + j] = 0.0);
         }
     }
