@@ -1,4 +1,5 @@
 use std::{slice, sync::Arc, vec};
+use half::f16;  // 添加这行
 pub struct Tensor<T> {
     data: Arc<Box<[T]>>,
     shape: Vec<usize>,
@@ -87,6 +88,26 @@ impl Tensor<f32> {
             let start = i * dim;
             println!("{:?}", &self.data()[start..][..dim]);
         }
+    }
+}
+
+impl Tensor<f16> {
+    #[allow(unstable_features)]
+    pub fn to_f32(&self) -> Tensor<f32> {
+        let f32_data: Vec<f32> = self.data().iter()
+            .map(|x| x.to_f32())
+            .collect();
+        Tensor::new(f32_data, &self.shape)
+    }
+}
+
+impl Tensor<f32> {
+    #[allow(unstable_features)]
+    pub fn to_f16(&self) -> Tensor<f16> {
+        let f16_data: Vec<f16> = self.data().iter()
+            .map(|x| f16::from_f32(*x))
+            .collect();
+        Tensor::new(f16_data, &self.shape)
     }
 }
 

@@ -1,6 +1,7 @@
 use std::cmp::{min, Ordering};
 use std::fs::File;
 use std::vec;
+use half::f16; 
 
 use crate::config::LlamaConfigJson;
 use crate::kvcache::KVCache;
@@ -55,7 +56,7 @@ macro_rules! flush_print {
     }};
 }
 
-impl Llama<f32> {
+impl Llama<f16> {
     pub fn from_safetensors(model_dir: impl AsRef<Path>) -> Self {
         let config = File::open(model_dir.as_ref().join("config.json")).unwrap();
         let config: LlamaConfigJson = serde_json::from_reader(config).unwrap();
@@ -104,21 +105,21 @@ impl Llama<f32> {
 
         // Computation Starts Here
         // Embedding lookup
-        OP::gather(&mut residual, input, &self.params.embedding_table);
+        OP::gather(&mut residual, input, &self.params.embedding_table.to_f32());
         for layer in 0..self.n_layers {
             OP::rms_norm(
                 &mut hidden_states,
                 &residual,
-                &self.params.rms_att_w[layer],
+                &self.params.rms_att_w[layer].to_f32(),
                 self.eps,
             );
 
             let q = (&mut q_buf).reshape(&vec![seq_len, self.n_q_h * self.dqkv]); // (seq, n_h * dqkv)
             let mut k = cache.k_cache(layer, past_seq_len); // (seq, n_kv_h * dqkv)
             let mut v = cache.v_cache(layer, past_seq_len); // (seq, n_kv_h * dqkv)
-            OP::matmul_transb(q, 0., &hidden_states, &self.params.wq[layer], 1.0);
-            OP::matmul_transb(&mut k, 0., &hidden_states, &self.params.wk[layer], 1.0);
-            OP::matmul_transb(&mut v, 0., &hidden_states, &self.params.wv[layer], 1.0);
+            OP::matmul_transb(q, 0., &hidden_states, &self.params.wq[layer].to_f32(), 1.0);
+            OP::matmul_transb(&mut k, 0., &hidden_states, &self.params.wk[layer].to_f32(), 1.0);
+            OP::matmul_transb(&mut v, 0., &hidden_states, &self.params.wv[layer].to_f32(), 1.0);
             OP::rope(
                 q.reshape(&vec![seq_len, self.n_q_h, self.dqkv]),
                 past_seq_len,
@@ -146,17 +147,17 @@ impl Llama<f32> {
                 self.dqkv,
             );
 
-            matmul_transb(&mut residual, 1f32, &hidden_states, &self.params.wo[layer], 1f32);
+            matmul_transb(&mut residual, 1f32, &hidden_states, &self.params.wo[layer].to_f32(), 1f32);
 
             mlp(
                 &mut residual,
                 &mut hidden_states,
                 &mut gate_buf,
                 &mut up_buf,
-                &self.params.w_up[layer],
-                &self.params.w_down[layer],
-                &self.params.w_gate[layer],
-                &self.params.rms_ffn_w[layer],
+                &self.params.w_up[layer].to_f32(),
+                &self.params.w_down[layer].to_f32(),
+                &self.params.w_gate[layer].to_f32(),
+                &self.params.rms_ffn_w[layer].to_f32(),
                 self.eps,
             );
         }
@@ -170,13 +171,13 @@ impl Llama<f32> {
         OP::rms_norm(
             &mut hidden_states,
             &residual,
-            &self.params.rms_out_w,
+            &self.params.rms_out_w.to_f32(),
             self.eps,
         );
 
-        OP::matmul_transb(&mut logits, 0., &hidden_states, &self.params.lm_head, 1.0);
+        OP::matmul_transb(&mut logits, 0., &hidden_states, &self.params.lm_head.to_f32(), 1.0);
 
-        logits // (1, vocab_size)
+        logits
     }
 
     pub fn generate(

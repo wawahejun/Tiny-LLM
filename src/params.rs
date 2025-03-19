@@ -1,9 +1,9 @@
-
 use core::slice;
 
 use crate::config::LlamaConfigJson;
 use crate::tensor::Tensor;
 use safetensors::{SafeTensors, View};
+use half::f16;
 pub struct LLamaParams<T> {
     // token_id to embedding lookup table
     pub embedding_table: Tensor<T>, // (vocab_size, dim)
@@ -23,29 +23,28 @@ pub struct LLamaParams<T> {
     pub lm_head: Tensor<T>,   // (vocab_size, dim)
 }
 
-impl LLamaParams<f32> {
+impl LLamaParams<f16> {
+    #[allow(unstable_features)]
     pub fn from_safetensors(safetensor: &SafeTensors, config: &LlamaConfigJson) -> Self {
-
         // 辅助函数：安全地获取张量
-        let get_tensor = |name: &str| -> Tensor<f32> {
+        let get_tensor = |name: &str| -> Tensor<f16> {
             match safetensor.tensor(name) {
                 Ok(data) => {
                     let p: usize = data.shape().iter().product();
                     let new_data = unsafe {
-                        std::slice::from_raw_parts(data.data().as_ptr() as *const f32, p)
+                        std::slice::from_raw_parts(data.data().as_ptr() as *const f16, p)
                     };
                     Tensor::new(Vec::from(new_data), &data.shape().to_vec())
                 }
                 Err(_) => {
                     eprintln!("Warning: Failed to load tensor: {}", name);
-                    // 返回一个合理的默认值，避免索引越界
-                    Tensor::new(vec![0.0], &vec![1]) // 根据实际情况调整默认值
+                    Tensor::new(vec![f16::from_f32(0.0)], &vec![1])
                 }
             }
         };
 
         // 辅助函数：获取各层的张量
-        let get_layer_tensors = |prefix: &str, suffix: &str| -> Vec<Tensor<f32>> {
+        let get_layer_tensors = |prefix: &str, suffix: &str| -> Vec<Tensor<f16>> {
             (0..config.num_hidden_layers)
                 .map(|i| get_tensor(&format!("{}.{}.{}", prefix, i, suffix)))
                 .collect()
